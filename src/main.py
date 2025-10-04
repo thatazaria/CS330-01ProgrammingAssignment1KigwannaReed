@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 
 # Initialize simulation settings.
-DT = 0.5    # Each update advances the clock by half a second.
+DT = 0.5 # Each update advances the clock by half a second.
 STEPS = 100 # 0.5 seconds/step * 100 steps = 50 seconds.
 
 # Initialize steering behavior constants.
@@ -53,7 +53,7 @@ def run_sim(characters, output_path):
             clock += DT
             for character in characters:
                 character["acceleration_x"], character["acceleration_z"] = get_steering(character, characters)
-                step_ne1(character, DT) # Update accordingly with physics.
+                ne1_update(character, DT) # Update accordingly with physics.
                 write_record(trajectory_file, clock, character)
 
 # Get steering behavior.
@@ -66,7 +66,7 @@ def get_steering(character, characters):
         return seek_behavior(character, characters)
     if character["behavior"] == ARRIVE:
         return arrive_behavior(character, characters)
-    # default: nothing fancy
+    
     return 0.0, 0.0
 
 # Continue.
@@ -75,150 +75,144 @@ def continue_behavior(character, characters):
 
 # Flee.
 def flee_behavior(character, characters):
-    
-    #Flee = accelerate directly away from the target.
-    #this is basically Seek but the direction is flipped.
-    
-    # map target index (1 → 2601, etc.) to actual id
+    # Find target.
     target_id = 2600 + character["target"]
-    target = next((ch for ch in characters if ch["id"] == target_id), None)
+    target = next((char for char in characters if char["id"] == target_id), None)
     if not target:
-        return 0.0, 0.0  # no valid target, no push
+        return 0.0, 0.0
 
-    # vector from target to me (points outward)
+    # Find direction.
     dx = character["position_x"] - target["position_x"]
     dz = character["position_z"] - target["position_z"]
-    dist = math.hypot(dx, dz)
+    distance = math.hypot(dx, dz)
 
-    if dist > 0:
-        ax = (dx / dist) * character["max_acceleration"]
-        az = (dz / dist) * character["max_acceleration"]
-        return ax, az
-    return 0.0, 0.0  # if we are on top of each other, there’s no direction to push
+    # Multiply the normalized distance by the maximum acceleration to output linear acceleration.
+    if distance > 0:
+        acceleration_x = (dx / distance) * character["max_acceleration"]
+        acceleration_z = (dz / distance) * character["max_acceleration"]
+        return acceleration_x, acceleration_z
+    return 0.0, 0.0
 
 # Seek.
-def seek_behavior(char, chars):
-    # Seek means: “accelerate toward your target character as hard as you can.”
-    # we figure out the direction (target minus self)
-    # normalize it
-    # scale by max acceleration
-
-    # figure out which character is the target (target=1 -> 2601, etc.)
-    target_id = 2600 + char["target"]
-    target = next((ch for ch in chars if ch["id"] == target_id), None)
+def seek_behavior(character, characters):
+    # Find target.
+    target_id = 2600 + character["target"]
+    target = next((char for char in characters if char["id"] == target_id), None)
     if not target:
-        return 0.0, 0.0  # if no target found, no push
+        return 0.0, 0.0
 
-    # vector from me -> target
-    dx = target["position_x"] - char["position_x"]
-    dz = target["position_z"] - char["position_z"]
-    dist = math.hypot(dx, dz)
+    # Find direction.
+    dx = target["position_x"] - character["position_x"]
+    dz = target["position_z"] - character["position_z"]
+    distance = math.hypot(dx, dz)
 
-    if dist > 0:
-        # push = unit vector * max_acceleration
-        acceleration_x = (dx / dist) * char["max_acceleration"]
-        acceleration_z = (dz / dist) * char["max_acceleration"]
+    # Multiply the normalized distance by the maximum acceleration to output linear acceleration.
+    if distance > 0:
+        acceleration_x = (dx / distance) * character["max_acceleration"]
+        acceleration_z = (dz / distance) * character["max_acceleration"]
         return acceleration_x, acceleration_z
-    return 0.0, 0.0  # sitting right on the target -> nothing to do
+    return 0.0, 0.0
 
 # Arrive.
 def arrive_behavior(character, characters):
-    
-    # Arrive = go toward the target but ease in smoothly.
-      # outside slowing_radius- aim for max speed.
-      # inside slowing_radius- scale speed down as distance shrinks (linear ramp).
-      # inside arrival_radius- stop (no acceleration).
-      # use time_to_target to gently nudge current velocity toward the target velocity.
-      # clamp accel to max_acceleration (physics step already clamps velocity to max_velocity).
-   
+    # Find target.
     target_id = 2600 + character["target"]
-    target = next((ch for ch in characters if ch["id"] == target_id), None)
+    target = next((char for char in characters if char["id"] == target_id), None)
     if not target:
         return 0.0, 0.0
 
-    # direction to the target
+    # Find distance to target.
     dx = target["position_x"] - character["position_x"]
     dz = target["position_z"] - character["position_z"]
-    dist = math.hypot(dx, dz)
+    distance = math.hypot(dx, dz)
+    
+    # Maintain current velocity if at target.
+    arrive_radius = character.get("arrival_radius", 0.0) or 0.0
+    time_to_target = character.get("time_to_target", 1.0) or 1.0
+    if distance <= arrive_radius:
+        velocity_x, velocity_z = character["velocity_x"], character["velocity_z"]
+        speed = math.hypot(velocity_x, velocity_z)
+        
+        if speed < 1e-6:
+            return 0.0, 0.0
 
-    # if we’re basically at the target, don’t push
-    arrive_r = character.get("arrival_radius", 0.0) or 0.0
-    if dist <= arrive_r:
-        return 0.0, 0.0
+        acceleration_x = -velocity_x / time_to_target
+        acceleration_z = -velocity_z / time_to_target
+        if distance > 0:
+            direction_x, direction_z = dx / distance, dz / distance
+            nudge = 0.1 * character["max_acceleration"]
+            acceleration_x += nudge * direction_x
+            acceleration_z += nudge * direction_z	
 
-    # choose a target speed depending on distance
-    max_v = character["max_velocity"]
-    slow_r = character.get("slowing_radius", 0.0) or 0.0
-    if slow_r <= 0.0 or dist > slow_r:
-        target_speed = max_v
+        acceleration_magnitude = math.hypot(acceleration_x, acceleration_z)
+        if acceleration_magnitude > character["max_acceleration"] and acceleration_magnitude > 0:
+            scale = character["max_acceleration"] / acceleration_magnitude
+            acceleration_x *= scale
+            acceleration_z *= scale
+            
+        return acceleration_x, acceleration_z
+
+    # If outside slow radius, set targetSpeed = maxSpeed. If inside slow radius, set targetSpeed proportional to distance.
+    slow_radius = character.get("slowing_radius", 0.0) or 0.0
+    if slow_radius <= 0.0 or distance > slow_radius:
+        target_speed = character["max_velocity"]
     else:
-        # linearly reduce speed as we enter the slowing zone
-        target_speed = max_v * (dist / slow_r)
+        target_speed = character["max_velocity"] * (distance / slow_radius)
 
-    # target velocity points at the target with the chosen speed
-    if dist > 0:
-        dir_x, dir_z = dx / dist, dz / dist
+    # Accelerate toward that targetSpeed.
+    if distance > 0:
+        direction_x, direction_z = dx / distance, dz / distance
     else:
-        dir_x, dir_z = 0.0, 0.0
-    target_vx = dir_x * target_speed
-    target_vz = dir_z * target_speed
+        direction_x, direction_z = 0.0, 0.0
+    target_velocity_x = direction_x * target_speed
+    target_velocity_z = direction_z * target_speed
+    acceleration_x = (target_velocity_x - character["velocity_x"]) / time_to_target
+    acceleration_z = (target_velocity_z - character["velocity_z"]) / time_to_target
 
-    # acceleration tries to match current vel to target vel over time_to_target
-    ttt = character.get("time_to_target", 1.0) or 1.0
-    ax = (target_vx - character["velocity_x"]) / ttt
-    az = (target_vz - character["velocity_z"]) / ttt
+    # Regulate acceleration.
+    acceleration_magnitude = math.hypot(acceleration_x, acceleration_z)
+    if acceleration_magnitude > character["max_acceleration"] and acceleration_magnitude > 0:
+        scale = character["max_acceleration"] / acceleration_magnitude
+        acceleration_x *= scale
+        acceleration_z *= scale
 
-    # clamp accel to max_acceleration so we don’t exceed allowed push
-    a_mag = math.hypot(ax, az)
-    max_a = character["max_acceleration"]
-    if a_mag > max_a and a_mag > 0:
-        scale = max_a / a_mag
-        ax *= scale
-        az *= scale
+    return acceleration_x, acceleration_z
 
-    return ax, az
-
-
-# CLAMP VELOCITY
-def clamp_vec(position_x, position_z, max_len):
-    # shrink the vector (position_x,position_z) if it’s longer than max_len.
-    # this keeps speeds under control so no one goes faster than allowed.
-    mag = math.hypot(position_x, position_z)      # length of the vector
-    if mag > max_len and mag > 0:
-        scale = max_len / mag
-        return position_x * scale, position_z * scale
-    return position_x, position_z
+# Write a record.
+def write_record(file, time, character):
+    file.write(
+        f"{time:.15g},{character['id']},{character['position_x']:.15g},{character['position_z']:.15g},"
+        f"{character['velocity_x']:.15g},{character['velocity_z']:.15g},{character['acceleration_x']:.15g},{character['acceleration_z']:.15g},"
+        f"{character['orientation']:.15g},{character['behavior']},FALSE\n"
+    )
 
 
-# YUCKY PHYSICS (NEWTON-EULER-1)
-def step_ne1(char, dt):
+# Update with Newton-Euler-1 integration update algorithm.
+def ne1_update(character, dt):
     # updates one character for one frame:
     # 1. move position forward based on current velocity
     # 2. update velocity using current acceleration
     # 3. clamp velocity to max_velocity
 
-    # 1. position update
-    char["position_x"] += char["velocity_x"] * dt
-    char["position_z"] += char["velocity_z"] * dt
+    # Update position.
+    character["position_x"] += character["velocity_x"] * dt
+    character["position_z"] += character["velocity_z"] * dt
 
-    # 2. velocity update
-    char["velocity_x"] += char["acceleration_x"] * dt
-    char["velocity_z"] += char["acceleration_z"] * dt
+    # Update velocity.
+    character["velocity_x"] += character["acceleration_x"] * dt
+    character["velocity_z"] += character["acceleration_z"] * dt
 
-    # 3. cap speed
-    char["velocity_x"], char["velocity_z"] = clamp_vec(char["velocity_x"], char["velocity_z"], char["max_velocity"])
+    # Regulate speed.
+    character["velocity_x"], character["velocity_z"] = clamp_velocity(character["velocity_x"], character["velocity_z"], character["max_velocity"])
 
 
-# WRITE A LINE OF OUTPUT
-def write_record(f, t, char):
-    # every line of trajectory.txt must have 11 fields:
-    # time,id,posX,posZ,velX,velZ,accelX,accelZ,orientation,behaviorCode,collision
-    # (collision is always FALSE for this assignment)
-    f.write(
-        f"{t:.15g},{char['id']},{char['position_x']:.15g},{char['position_z']:.15g},"
-        f"{char['velocity_x']:.15g},{char['velocity_z']:.15g},{char['acceleration_x']:.15g},{char['acceleration_z']:.15g},"
-        f"{char['orientation']:.15g},{char['behavior']},FALSE\n"
-    )
+# Regulate velocity.
+def clamp_velocity(position_x, position_z, max_length):
+    magnitude = math.hypot(position_x, position_z)      
+    if magnitude > max_length and magnitude > 0:
+        scale = max_length / magnitude
+        return position_x * scale, position_z * scale
+    return position_x, position_z
 
 
 if __name__ == "__main__":
